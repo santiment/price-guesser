@@ -36,5 +36,14 @@ env/
 .DS_Store
 Thumbs.db
 
+# Logs
+*.log
+*.log.*
+logs/
+log/
+
 # Streamlit
 .streamlit/secrets.toml
+
+# Metrics output logs only (CSVs are tracked)
+metrics_output/*.log

@@ -19,6 +19,7 @@ from trade_engine import classify_outcome, simulate_trade
 from stats_tracker import SessionStats
 from bias_analytics import render_bias_dashboard
 from market_cap import get_market_caps, filter_symbols_by_market_cap
+from metrics import load_metrics, get_available_metrics, filter_symbols_by_metric
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +30,18 @@ from market_cap import get_market_caps, filter_symbols_by_market_cap
 def load_market_caps() -> dict[str, float]:
     """Load market caps from market_caps.csv."""
     return get_market_caps()
+
+
+@st.cache_data
+def load_metrics_cached(symbol: str) -> pd.DataFrame | None:
+    """Load metrics for a symbol. Cached."""
+    return load_metrics(symbol)
+
+
+@st.cache_data
+def filter_symbols_by_metric_cached(symbols: tuple[str, ...], metric: str) -> tuple[str, ...]:
+    """Filter symbols to those with valid metric data. Cached."""
+    return tuple(filter_symbols_by_metric(list(symbols), metric))
 
 
 @st.cache_data
@@ -175,18 +188,33 @@ def render_unified_chart(
     entry_price: float | None = None,
     exit_price: float | None = None,
     reveal: bool = False,
+    use_metrics: bool = False,
+    selected_metric: str | None = None,
+    metric_style: str = "line",
 ):
     """
     Single chart: historical (60-day) + optional future (14-day) attached to the right.
-    When reveal=False: hide asset name and time axis. Reveal after submit.
+    Volume bars below price. When reveal=False: hide asset name and time axis.
     """
     import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
 
     hist = df.iloc[start_idx:end_idx]
-    fig = go.Figure(data=[
+    has_metric = use_metrics and selected_metric
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.7, 0.3],
+        subplot_titles=("Price", "Volume"),
+        specs=[[{"secondary_y": has_metric}], [{}]],
+    )
+
+    fig.add_trace(
         go.Candlestick(
             x=hist["datetime"],
             open=hist["open"],
@@ -194,27 +222,102 @@ def render_unified_chart(
             low=hist["low"],
             close=hist["close"],
             name="OHLC",
-        )
-    ])
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Metric overlay: load, merge, plot on right y-axis with raw values
+    # Metrics are often daily; forward-fill to align with 4h candles for a continuous line
+    if use_metrics and selected_metric:
+        metrics_df = load_metrics_cached(symbol)
+        if metrics_df is not None and selected_metric in metrics_df.columns:
+            merged = hist[["datetime", "close"]].copy()
+            merged = merged.merge(
+                metrics_df[["timestamp", selected_metric]],
+                left_on="datetime",
+                right_on="timestamp",
+                how="left",
+            )
+            vals = merged[selected_metric].ffill()  # forward-fill: metrics are often daily, propagate to 4h
+            if vals.notna().any():
+                x_vals = merged["datetime"]
+                y_vals = vals  # raw values for right axis
+                trace_kw = dict(row=1, col=1, secondary_y=True)
+                if metric_style == "bar":
+                    fig.add_trace(
+                        go.Bar(
+                            x=x_vals,
+                            y=y_vals,
+                            name=selected_metric,
+                            marker_color="#ffa726",
+                            opacity=0.6,
+                        ),
+                        **trace_kw,
+                    )
+                elif metric_style == "area":
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_vals,
+                            y=y_vals,
+                            mode="lines",
+                            name=selected_metric,
+                            line=dict(color="#ffa726", width=1.5),
+                            fill="tozeroy",
+                            fillcolor="rgba(255, 167, 38, 0.2)",
+                        ),
+                        **trace_kw,
+                    )
+                elif metric_style == "scatter":
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_vals,
+                            y=y_vals,
+                            mode="markers",
+                            name=selected_metric,
+                            marker=dict(color="#ffa726", size=4, symbol="circle"),
+                        ),
+                        **trace_kw,
+                    )
+                else:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_vals,
+                            y=y_vals,
+                            mode="lines",
+                            name=selected_metric,
+                            line=dict(color="#ffa726", width=1.5, dash="dot"),
+                        ),
+                        **trace_kw,
+                    )
+
+    colors = ["#26a69a" if c >= o else "#ef5350" for c, o in zip(hist["close"], hist["open"])]
+    fig.add_trace(
+        go.Bar(x=hist["datetime"], y=hist["volume"], marker_color=colors, name="Volume"),
+        row=2,
+        col=1,
+    )
 
     if show_future:
         exit_idx = end_idx + config.forward_candles - 1
         if exit_idx < len(df):
             future = df.iloc[end_idx : exit_idx + 1]
-            fig.add_trace(go.Scatter(
-                x=future["datetime"],
-                y=future["close"],
-                mode="lines+markers",
-                name="Future",
-                line=dict(color="#00d4aa", width=2),
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=future["datetime"],
+                    y=future["close"],
+                    mode="lines+markers",
+                    name="Future",
+                    line=dict(color="#00d4aa", width=2),
+                ),
+                row=1,
+                col=1,
+            )
             if entry_price is not None and exit_price is not None:
-                up_line = entry_price * (1 + config.threshold)
-                down_line = entry_price * (1 - config.threshold)
-                fig.add_hline(y=up_line, line_dash="dash", line_color="green", annotation_text="+5%")
-                fig.add_hline(y=down_line, line_dash="dash", line_color="red", annotation_text="-5%")
-                fig.add_hline(y=entry_price, line_dash="dot", line_color="gray", annotation_text="Entry")
-                fig.add_hline(y=exit_price, line_dash="dot", line_color="orange", annotation_text="Exit")
+                fig.add_hline(y=entry_price * (1 + config.threshold), line_dash="dash", line_color="green", annotation_text="+5%", row=1, col=1)
+                fig.add_hline(y=entry_price * (1 - config.threshold), line_dash="dash", line_color="red", annotation_text="-5%", row=1, col=1)
+                fig.add_hline(y=entry_price, line_dash="dot", line_color="gray", annotation_text="Entry", row=1, col=1)
+                fig.add_hline(y=exit_price, line_dash="dot", line_color="orange", annotation_text="Exit", row=1, col=1)
 
     layout = dict(
         height=600,
@@ -225,8 +328,15 @@ def render_unified_chart(
         layout["title"] = f"{symbol} — {config.window_days}-day window" + (" + 14-day future" if show_future else "")
     else:
         layout["title"] = ""
-        layout["xaxis"] = dict(showticklabels=False)
+    if has_metric and selected_metric:
+        layout["yaxis2"] = dict(
+            title=dict(text=selected_metric, font=dict(color="#ffa726")),
+            showgrid=False,
+            tickfont=dict(color="#ffa726"),
+        )
     fig.update_layout(**layout)
+    if not reveal:
+        fig.update_xaxes(showticklabels=False)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -263,6 +373,31 @@ def main():
             help="Classification: track accuracy only. Trade Simulation: simulate positions, track equity and PnL.",
         )
         trade_mode = mode == "Trade Simulation Mode"
+
+        st.subheader("Metrics")
+        use_metrics = st.checkbox(
+            "Use metrics",
+            value=st.session_state.get("use_metrics_checkbox", st.session_state.get("use_metrics", False)),
+            key="use_metrics_checkbox",
+            help="Overlay a selected metric on the price chart. Metric values are scaled to fit the chart.",
+        )
+        available_metrics = get_available_metrics()
+        selected_metric = None
+        if use_metrics and available_metrics:
+            selected_metric = st.selectbox(
+                "Metric",
+                options=available_metrics,
+                key="metric_selectbox",
+                help="Metric to overlay on the price chart.",
+            )
+            metric_style = st.selectbox(
+                "Metric style",
+                options=["line", "bar", "area", "scatter"],
+                key="metric_style_selectbox",
+                help="How to display the metric: line, bar, area fill, or scatter points.",
+            )
+        else:
+            metric_style = "line"
 
         with st.form("settings_form", clear_on_submit=False):
             timed_mode = st.checkbox(
@@ -336,12 +471,23 @@ def main():
             if not filtered_symbols:
                 filtered_symbols = symbols
 
+            # When Use metrics is enabled, keep only assets with valid metric data
+            if use_metrics and selected_metric:
+                filtered_symbols = list(
+                    filter_symbols_by_metric_cached(tuple(filtered_symbols), selected_metric)
+                )
+                if not filtered_symbols:
+                    st.warning(
+                        f"No assets have valid data for metric '{selected_metric}'. "
+                        "Disable Use metrics or choose another metric."
+                    )
+
             n_symbols = len(filtered_symbols)
             num_assets = st.slider(
                 "Assets to sample from",
                 min_value=1,
-                max_value=n_symbols,
-                value=n_symbols,
+                max_value=max(1, n_symbols),
+                value=min(n_symbols, max(1, n_symbols)),
                 help="Number of assets to randomly sample rounds from. More = more variety.",
             )
 
@@ -450,6 +596,9 @@ def main():
                 st.session_state.game_config = config
                 st.session_state.game_ready = len(pool) > 0
                 st.session_state.position_pct = position_pct
+                st.session_state.use_metrics = use_metrics
+                st.session_state.selected_metric = selected_metric if use_metrics else None
+                st.session_state.metric_style = metric_style if use_metrics else "line"
                 if trade_mode:
                     st.session_state.stats.equity = 1.0
                     st.session_state.stats.bust = False
@@ -571,12 +720,18 @@ def main():
         if entry_px is None:
             entry_px = float(df.iloc[end_idx - 1]["close"])
             exit_px = float(df.iloc[end_idx + config.forward_candles - 1]["close"])
+    use_metrics = st.session_state.get("use_metrics", False)
+    selected_metric = st.session_state.get("selected_metric")
+    metric_style = st.session_state.get("metric_style", "line")
     render_unified_chart(
         df, start_idx, end_idx, config, symbol,
         show_future=show_future,
         entry_price=entry_px,
         exit_price=exit_px,
         reveal=show_future,
+        use_metrics=use_metrics,
+        selected_metric=selected_metric,
+        metric_style=metric_style,
     )
 
     # Buttons (only if not submitted)
