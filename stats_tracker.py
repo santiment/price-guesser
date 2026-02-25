@@ -30,6 +30,8 @@ class SessionStats:
     # Trade simulation
     cumulative_pnl: float = 0.0
     trade_returns: list[float] = field(default_factory=list)
+    equity: float = 1.0
+    bust: bool = False
 
     # Regime performance: {regime_key: {correct, total}}
     regime_performance: dict = field(default_factory=dict)
@@ -77,6 +79,7 @@ class SessionStats:
         was_timed: bool = False,
         was_streak_after_wins: bool | None = None,  # auto-computed from current state
         was_streak_after_losses: bool | None = None,
+        position_pct: float = 100.0,
     ) -> None:
         """Record a round result."""
         self.total_rounds += 1
@@ -112,9 +115,13 @@ class SessionStats:
             correct_p = self.confusion_matrix[p][p]
             self.class_accuracy[p] = correct_p / total_p if total_p else 0.0
 
-        # Trade
-        self.cumulative_pnl += trade_return
-        self.trade_returns.append(trade_return)
+        # Trade (position sizing: effective return = position_pct% of equity at risk)
+        effective_return = (position_pct / 100.0) * trade_return
+        self.trade_returns.append(effective_return)
+        self.equity *= 1 + effective_return
+        self.cumulative_pnl = self.equity - 1.0
+        if self.equity < 0.05:
+            self.bust = True
 
         # Regime
         if regime_key:

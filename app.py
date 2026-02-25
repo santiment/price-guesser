@@ -190,7 +190,7 @@ def render_unified_chart(
         template="plotly_dark",
     )
     if reveal:
-        layout["title"] = f"{symbol} — 60-day window" + (" + 14-day future" if show_future else "")
+        layout["title"] = f"{symbol} — {config.window_days}-day window" + (" + 14-day future" if show_future else "")
     else:
         layout["title"] = ""
         layout["xaxis"] = dict(showticklabels=False)
@@ -217,14 +217,20 @@ def main():
     # Load market caps from CSV for filter
     market_caps = load_market_caps()
 
-    # Sidebar: Config (form for explicit Apply)
+    # Sidebar: Config (mode outside form so toggle updates UI immediately)
     with st.sidebar:
         st.header("Settings")
 
+        mode = st.radio("Mode", ["Classification Mode", "Trade Simulation Mode"], index=0, key="mode_radio")
+        trade_mode = mode == "Trade Simulation Mode"
+
         with st.form("settings_form", clear_on_submit=False):
-            mode = st.radio("Mode", ["Classification Mode", "Trade Simulation Mode"], index=0)
-            trade_mode = mode == "Trade Simulation Mode"
             timed_mode = st.checkbox("Timed Mode", value=False)
+            position_pct = 100
+            if trade_mode:
+                position_pct = st.slider("Position size (% of equity)", 0, 100, 100)
+
+            cfg_window = st.slider("Sample period (days)", 30, 120, config.window_days, key="cfg_window")
 
             st.subheader("Regime Filters")
             trend_opts = ["trending", "ranging", "neutral"]
@@ -257,7 +263,6 @@ def main():
             if not filtered_symbols:
                 filtered_symbols = symbols
 
-            selected_symbol = st.selectbox("Asset", filtered_symbols, index=0)
             num_assets = st.slider(
                 "Assets to sample from",
                 1,
@@ -266,7 +271,6 @@ def main():
             )
 
             with st.expander("Advanced Config"):
-                cfg_window = st.number_input("window_days", 30, 120, config.window_days, key="cfg_window")
                 cfg_forward = st.number_input("forward_days", 7, 30, config.forward_days, key="cfg_forward")
                 cfg_thresh = st.number_input("threshold", 0.01, 0.20, float(config.threshold), 0.01, key="cfg_thresh")
                 cfg_adx_t = st.number_input("ADX trending", 15.0, 40.0, config.adx_threshold_trending, 1.0, key="cfg_adx_t")
@@ -287,11 +291,17 @@ def main():
             apply_clicked = st.form_submit_button("Apply Settings & Prepare Game")
 
         if apply_clicked:
+            # Reset session state for fresh start with new settings
+            st.session_state.current_round = None
+            st.session_state.answer_submitted = False
+            if "pending_result" in st.session_state:
+                del st.session_state.pending_result
+            if "timer_start" in st.session_state:
+                del st.session_state.timer_start
+            if "countdown" in st.session_state:
+                del st.session_state.countdown
             with st.spinner("Computing regimes (may take a moment)..."):
-                sample_symbols = [selected_symbol] + [
-                    s for s in filtered_symbols if s != selected_symbol
-                ][: num_assets - 1]
-                sample_symbols = tuple(sample_symbols[:num_assets])
+                sample_symbols = tuple(list(filtered_symbols)[:num_assets])
 
                 all_regimes = load_all_regimes(
                     sample_symbols,
@@ -317,6 +327,10 @@ def main():
                 st.session_state.pool = pool
                 st.session_state.game_config = config
                 st.session_state.game_ready = len(pool) > 0
+                st.session_state.position_pct = position_pct
+                if trade_mode:
+                    st.session_state.stats.equity = 1.0
+                    st.session_state.stats.bust = False
             if st.session_state.game_ready:
                 st.success(f"Ready! {len(pool)} windows available.")
             else:
@@ -332,6 +346,7 @@ def main():
         st.subheader("Stats")
         st.metric("Accuracy", f"{stats.accuracy:.1%}")
         if trade_mode:
+            st.metric("Equity", f"{stats.equity:.1%}")
             st.metric("Cumulative PnL", f"{stats.cumulative_pnl:.2%}")
             st.metric("Win Rate", f"{stats.win_rate:.1%}")
             st.metric("Sharpe", f"{stats.sharpe_ratio:.2f}")
@@ -397,6 +412,7 @@ def main():
             exit_price = float(df.iloc[end_idx + config.forward_candles - 1]["close"])
             actual = classify_outcome(entry_price, exit_price, config.threshold)
             regime_key = f"{regime.get('trend', '?')}/{regime.get('volatility', '?')}/{regime.get('prior_move', '?')}"
+            position_pct = st.session_state.get("position_pct", 100)
             st.session_state.stats.record(
                 prediction=None,
                 actual=actual,
@@ -404,6 +420,7 @@ def main():
                 trade_return=0.0,
                 regime_key=regime_key,
                 was_timed=True,
+                position_pct=position_pct,
             )
             st.session_state.answer_submitted = True
             st.session_state.pending_result = {
@@ -482,9 +499,18 @@ def main():
 
         # Chart with future is already shown above (unified chart)
 
+        stats = st.session_state.stats
         pool = st.session_state.get("pool", [])
         config = st.session_state.get("game_config", DEFAULT_CONFIG)
-        if st.button("Next Round", type="primary") and pool:
+
+        if stats.bust:
+            st.error("You're bust! Equity fell below 5% of initial.")
+            if st.button("New Game", type="primary"):
+                st.session_state.stats = SessionStats()
+                del st.session_state.pending_result
+                st.session_state.current_round = None
+                st.rerun()
+        elif st.button("Next Round", type="primary") and pool:
             _start_next_round(pool, config, timed_mode)
             st.rerun()
         st.divider()
@@ -540,6 +566,7 @@ def submit_answer(
     regime_key = f"{regime.get('trend', '?')}/{regime.get('volatility', '?')}/{regime.get('prior_move', '?')}"
 
     stats = st.session_state.stats
+    position_pct = st.session_state.get("position_pct", 100)
     stats.record(
         prediction=prediction,
         actual=actual,
@@ -547,6 +574,7 @@ def submit_answer(
         trade_return=trade_return,
         regime_key=regime_key,
         was_timed=timed_mode,
+        position_pct=position_pct,
     )
 
     st.session_state.answer_submitted = True

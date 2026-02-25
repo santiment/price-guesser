@@ -8,7 +8,7 @@ class GameConfig:
     """Game parameters - all configurable."""
 
     # Window & forward
-    window_days: int = 60
+    window_days: int = 90
     forward_days: int = 14
     threshold: float = 0.05
 
