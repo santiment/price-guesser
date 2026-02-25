@@ -73,6 +73,38 @@ def load_all_regimes(
     return result
 
 
+@st.dialog("Rules & How to Play")
+def show_rules_dialog():
+    st.markdown("""
+    ## What is this game?
+
+    A **pattern recognition and trading simulation** game. You see a historical price chart and predict whether the price will go **UP**, **DOWN**, or **SAME** over the next 14 days.
+
+    ## Goal
+
+    Improve your **trading intuition** and **pattern recognition** while building **objective stats** about your performance. Track accuracy, bias, streak sensitivity, and (in Trade Mode) simulated PnL.
+
+    ## How it works
+
+    1. **Configure** settings and click **Apply Settings & Prepare Game**
+    2. Click **Start Round** to see a price chart (asset and dates hidden until you answer)
+    3. Predict: **↑ UP** (price rises >5%), **→ SAME** (within ±5%), or **↓ DOWN** (price falls >5%)
+    4. After submitting, the future period is revealed and your result is shown
+    5. Click **Next Round** to continue
+
+    ## Modes
+
+    - **Classification Mode**: Track accuracy only
+    - **Trade Simulation Mode**: Simulate long/short positions, track equity, PnL, and bust risk (game ends if equity falls below 5%)
+
+    ## Tips
+
+    - Use **Regime Filters** to practice in specific market conditions
+    - Use **Market Cap** filters to focus on majors, large caps, etc.
+    - Check the **Bias Dashboard** to spot prediction biases and streak patterns
+    """)
+
+
 def get_available_symbols(candles_dir: str) -> list[str]:
     """List available symbols from candles dir."""
     path = Path(candles_dir)
@@ -220,25 +252,65 @@ def main():
     # Sidebar: Config (mode outside form so toggle updates UI immediately)
     with st.sidebar:
         st.header("Settings")
+        if st.button("Rules", help="How to play and what the game is about"):
+            show_rules_dialog()
 
-        mode = st.radio("Mode", ["Classification Mode", "Trade Simulation Mode"], index=0, key="mode_radio")
+        mode = st.radio(
+            "Mode",
+            ["Classification Mode", "Trade Simulation Mode"],
+            index=0,
+            key="mode_radio",
+            help="Classification: track accuracy only. Trade Simulation: simulate positions, track equity and PnL.",
+        )
         trade_mode = mode == "Trade Simulation Mode"
 
         with st.form("settings_form", clear_on_submit=False):
-            timed_mode = st.checkbox("Timed Mode", value=False)
+            timed_mode = st.checkbox(
+                "Timed Mode",
+                value=False,
+                help="Answer within the timer or it counts as incorrect.",
+            )
             position_pct = 100
             if trade_mode:
-                position_pct = st.slider("Position size (% of equity)", 0, 100, 100)
+                position_pct = st.slider(
+                    "Position size (% of equity)",
+                    0,
+                    100,
+                    100,
+                    help="How much of your equity to risk per trade. Lower = less risk, slower equity growth.",
+                )
 
-            cfg_window = st.slider("Sample period (days)", 30, 120, config.window_days, key="cfg_window")
+            cfg_window = st.slider(
+                "Sample period (days)",
+                30,
+                120,
+                config.window_days,
+                key="cfg_window",
+                help="Length of the historical chart you see before making a prediction.",
+            )
 
             st.subheader("Regime Filters")
             trend_opts = ["trending", "ranging", "neutral"]
             vol_opts = ["low", "medium", "high"]
             prior_opts = ["strong_up", "strong_down", "mild"]
-            trend_filter = st.multiselect("Trend", trend_opts, default=[])
-            volatility_filter = st.multiselect("Volatility", vol_opts, default=[])
-            prior_move_filter = st.multiselect("Prior Move", prior_opts, default=[])
+            trend_filter = st.multiselect(
+                "Trend",
+                trend_opts,
+                default=[],
+                help="Filter by ADX trend: trending (strong direction), ranging (sideways), or neutral.",
+            )
+            volatility_filter = st.multiselect(
+                "Volatility",
+                vol_opts,
+                default=[],
+                help="Filter by 14-day realized volatility: low, medium, or high.",
+            )
+            prior_move_filter = st.multiselect(
+                "Prior Move",
+                prior_opts,
+                default=[],
+                help="Filter by price move over the sample period: strong up (>20%), strong down (<-20%), or mild.",
+            )
 
             st.subheader("Market Cap")
             cap_opts = ["majors", "large_caps", "mid_caps", "small_caps"]
@@ -253,6 +325,7 @@ def main():
                 options=cap_opts,
                 format_func=lambda x: cap_labels[x],
                 default=[],
+                help="Filter assets by market cap. Empty = all assets.",
             )
 
             filtered_symbols = (
@@ -263,20 +336,69 @@ def main():
             if not filtered_symbols:
                 filtered_symbols = symbols
 
+            n_symbols = len(filtered_symbols)
             num_assets = st.slider(
                 "Assets to sample from",
-                1,
-                len(filtered_symbols),
-                min(5, len(filtered_symbols)),
+                min_value=1,
+                max_value=n_symbols,
+                value=n_symbols,
+                help="Number of assets to randomly sample rounds from. More = more variety.",
             )
 
             with st.expander("Advanced Config"):
-                cfg_forward = st.number_input("forward_days", 7, 30, config.forward_days, key="cfg_forward")
-                cfg_thresh = st.number_input("threshold", 0.01, 0.20, float(config.threshold), 0.01, key="cfg_thresh")
-                cfg_adx_t = st.number_input("ADX trending", 15.0, 40.0, config.adx_threshold_trending, 1.0, key="cfg_adx_t")
-                cfg_adx_r = st.number_input("ADX ranging", 10.0, 25.0, config.adx_threshold_ranging, 1.0, key="cfg_adx_r")
-                cfg_vol = st.number_input("volatility_days", 7, 30, config.volatility_days, key="cfg_vol")
-                cfg_timer = int(st.number_input("timer_seconds", 1, 30, config.timer_seconds, key="cfg_timer"))
+                cfg_forward = st.number_input(
+                    "forward_days",
+                    7,
+                    30,
+                    config.forward_days,
+                    key="cfg_forward",
+                    help="Days into the future you're predicting (hold period in Trade Mode).",
+                )
+                cfg_thresh = st.number_input(
+                    "threshold",
+                    0.01,
+                    0.20,
+                    float(config.threshold),
+                    0.01,
+                    key="cfg_thresh",
+                    help="Price move threshold for UP/DOWN. Above +threshold = UP, below -threshold = DOWN.",
+                )
+                cfg_adx_t = st.number_input(
+                    "ADX trending",
+                    15.0,
+                    40.0,
+                    config.adx_threshold_trending,
+                    1.0,
+                    key="cfg_adx_t",
+                    help="ADX above this = trending regime.",
+                )
+                cfg_adx_r = st.number_input(
+                    "ADX ranging",
+                    10.0,
+                    25.0,
+                    config.adx_threshold_ranging,
+                    1.0,
+                    key="cfg_adx_r",
+                    help="ADX below this = ranging regime.",
+                )
+                cfg_vol = st.number_input(
+                    "volatility_days",
+                    7,
+                    30,
+                    config.volatility_days,
+                    key="cfg_vol",
+                    help="Lookback for realized volatility calculation.",
+                )
+                cfg_timer = int(
+                    st.number_input(
+                        "timer_seconds",
+                        1,
+                        30,
+                        config.timer_seconds,
+                        key="cfg_timer",
+                        help="Seconds to answer in Timed Mode.",
+                    )
+                )
 
             config = GameConfig(
                 window_days=cfg_window,
